@@ -86,34 +86,42 @@ class DependencyAgent:
 
         return is_fully_pinned, lines
     
+    # In agent_logic.py
+
     def _install_and_build_environment(self, venv_dir, requirements_path):
         """
-        Creates a venv and robustly installs a complex project with build dependencies.
-        This is the single source of truth for all environment creation.
-        Returns (success, python_executable, message)
+        Creates a venv and robustly installs a complex project by providing all
+        dependencies in a single, atomic pip install command.
         """
         if venv_dir.exists(): shutil.rmtree(venv_dir)
         venv.create(venv_dir, with_pip=True)
         python_executable = str((venv_dir / "bin" / "python").resolve())
 
-        # For compiled projects, some build tools might be needed. This is expert knowledge.
-        # This list can be expanded if other projects need more tools.
+        # --- THIS IS THE FINAL, UNIFIED LOGIC ---
+
+        # 1. Define the core build tools that might not be in the requirements file.
         build_tools = ["setuptools", "wheel", "cython", "meson", "ninja", "meson-python", "pybind11"]
 
-        print(f"\n--- Installing build toolchain in {venv_dir} ---")
-        _, stderr, returncode = run_command([python_executable, "-m", "pip", "install"] + build_tools)
-        if returncode != 0:
-            return False, python_executable, f"Failed to install build toolchain: {stderr}"
+        # 2. Read all the project dependencies from the file.
+        with open(requirements_path, "r") as f:
+            project_deps = [line.strip() for line in f if line.strip() and not line.strip().startswith('#')]
+
+        # 3. Combine them into a SINGLE list.
+        full_dependency_list = build_tools + project_deps
         
-        print(f"\n--- Installing project requirements from {requirements_path} ---")
+        # 4. Perform ONE single, authoritative installation.
+        #    By giving pip everything at once, its resolver can see the whole
+        #    picture and correctly sequence the installation of tools and dependencies.
+        print(f"\n--- Installing complete build and runtime environment in {venv_dir} ---")
         install_command = [
             python_executable, "-m", "pip", "install",
-            "--no-build-isolation", 
-            "-r", str(requirements_path)
-        ]
+            "--no-build-isolation" # Still important!
+        ] + full_dependency_list
+        
         _, stderr, returncode = run_command(install_command)
+        
         if returncode != 0:
-            return False, python_executable, f"Failed to install/build project: {stderr}"
+            return False, python_executable, f"Failed to create environment: {stderr}"
 
         return True, python_executable, "Environment created successfully."
     
