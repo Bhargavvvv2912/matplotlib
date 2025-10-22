@@ -92,69 +92,42 @@ class DependencyAgent:
         venv_dir = Path("./bootstrap_venv")
         if venv_dir.exists(): shutil.rmtree(venv_dir)
         venv.create(venv_dir, with_pip=True)
-        
-        # This function now uses the new, robust helper function
-        success, result, error_log = self._run_bootstrap_and_validate(venv_dir, self.requirements_path)
-        
-        if success:
-            print("\nInitial baseline is valid and stable!")
-            with open(self.requirements_path, "w") as f: f.write(result["packages"])
-            start_group("View new requirements.txt content"); print(result["packages"]); end_group()
-            if result["metrics"] and "not available" not in result["metrics"]:
-                print(f"\n{'='*70}\n=== BOOTSTRAP SUCCESSFUL: METRICS FOR THE NEW BASELINE ===\n" + "\n".join([f"  {line}" for line in result['metrics'].split('\n')]) + f"\n{'='*70}\n")
-                with open(self.config["METRICS_OUTPUT_FILE"], "w") as f: f.write(result["metrics"])
-            end_group()
-            return
-
-        # --- The rest of the new, resilient bootstrap logic follows ---
-        print("\nCRITICAL: Initial baseline failed validation. Initiating Bootstrap Healing Protocol.", file=sys.stderr)
-        start_group("View Initial Baseline Failure Log"); print(error_log); end_group()
-        
-        python_executable = str((venv_dir / "bin" / "python").resolve())
-        initial_failing_packages_list, _, _ = run_command([python_executable, "-m", "pip", "freeze"])
-        initial_failing_packages = self._prune_pip_freeze(initial_failing_packages_list).split('\n')
-
-        healed_packages_str = self._attempt_llm_bootstrap_heal(initial_failing_packages, error_log)
-        
-        if not healed_packages_str:
-            print("\nINFO: LLM healing failed. Falling back to Deterministic Downgrade Protocol.")
-            healed_packages_str = self._attempt_deterministic_bootstrap_heal(initial_failing_packages)
-
-        if healed_packages_str:
-            print("\nSUCCESS: Bootstrap Healing Protocol found a stable baseline.")
-            with open(self.requirements_path, "w") as f: f.write(healed_packages_str)
-            start_group("View Healed and Pinned requirements.txt"); print(healed_packages_str); end_group()
-        else:
-            sys.exit("CRITICAL ERROR: All bootstrap healing attempts failed. Cannot establish a stable baseline.")
-        end_group()
-    def _run_bootstrap_and_validate(self, venv_dir, requirements_source):
-        """
-        Installs a set of requirements into a venv and runs the validation script.
-        This is a core helper used by both the initial bootstrap and the healing protocols.
-        """
-        # THE FIX IS HERE: Use .resolve() to get an absolute path for robustness.
         python_executable = str((venv_dir / "bin" / "python").resolve())
         
-        # This function is smart: it can take a file path OR a list of packages.
-        if isinstance(requirements_source, (Path, str)):
-            pip_command = [python_executable, "-m", "pip", "install", "-r", str(requirements_source)]
-        else: # It's a list of packages, so we write a temporary file.
-            temp_reqs_path = venv_dir / "temp_reqs.txt"
-            with open(temp_reqs_path, "w") as f:
-                f.write("\n".join(requirements_source))
-            pip_command = [python_executable, "-m", "pip", "install", "-r", str(temp_reqs_path)]
-            
-        _, stderr_install, returncode = run_command(pip_command)
+        # --- THIS IS THE CORRECT, SINGLE-STEP BOOTSTRAP LOGIC ---
+
+        # 1. Run ONE single, authoritative command that installs both the dependencies
+        #    AND builds the local project (if '-e' is present in the file).
+        print(f"\n--- Step 1: Installing from requirements file: {self.requirements_path} ---")
+        _, stderr, returncode = run_command([python_executable, "-m", "pip", "install", "-r", str(self.requirements_path)])
+        
         if returncode != 0:
-            return False, None, f"Failed to install dependencies. Error: {stderr_install}"
+            print(f"CRITICAL ERROR: Failed to install initial dependencies. Log follows:")
+            print(f"--- pip stderr ---\n{stderr}\n---")
+            sys.exit("Bootstrap installation failed.")
+        print("Initial installation successful.")
 
-        # Now, the absolute path is passed to validate_changes.
+        # 2. If installation succeeds, immediately validate the environment.
+        print("\n--- Step 2: Validating the new baseline environment ---")
         success, metrics, validation_output = validate_changes(python_executable, self.config, group_title="Running Validation on New Baseline")
         if not success:
-            return False, None, validation_output
-            
+            print("View Initial Baseline Failure Log", validation_output)
+            sys.exit("CRITICAL ERROR: Initial dependencies passed installation but failed validation.")
+        print("Validation of new baseline PASSED.")
+
+        # 3. If both steps succeed, freeze the final, correct state.
+        print("\n--- Step 3: Freezing the validated environment ---")
         installed_packages, _, _ = run_command([python_executable, "-m", "pip", "freeze"])
-        return True, {"metrics": metrics, "packages": self._prune_pip_freeze(installed_packages)}, None
+        final_packages = self._prune_pip_freeze(installed_packages) # Your _prune_pip_freeze should keep '-e' lines!
+        with open(self.requirements_path, "w") as f: f.write(final_packages)
+        
+        start_group("View new requirements.txt content"); print(final_packages); end_group()
+        if metrics and "not available" not in metrics:
+            print(f"\n{'='*70}\n=== BOOTSTRAP SUCCESSFUL... ===\n" + "\n".join([f"  {line}" for line in metrics.split('\n')]) + f"\n{'='*70}\n")
+            with open(self.config["METRICS_OUTPUT_FILE"], "w") as f: f.write(metrics)
+        
+        end_group()
+        return
 
 
     def run(self):
