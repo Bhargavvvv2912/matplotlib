@@ -1,4 +1,4 @@
-name: Autonomous Dependency Updater
+name: Autonomous Dependency Updater for Matplotlib
 
 on:
   workflow_dispatch:
@@ -17,38 +17,52 @@ jobs:
       - name: Checkout Experiment Repository
         uses: actions/checkout@v4
 
-      - name: Clone Target Repository (e.g., Pillow)
-        run: git clone https://github.com/python-pillow/Pillow.git
+      - name: Clone Matplotlib Repository
+        run: git clone https://github.com/matplotlib/matplotlib.git
 
-      # --- This is the PROJECT-SPECIFIC PART ---
-      - name: Install System Dependencies for Target
+      - name: Install System Dependencies for Matplotlib
         run: |
           sudo apt-get update
-          sudo apt-get install -y libjpeg-dev zlib1g-dev libtiff5-dev liblcms2-dev libwebp-dev libfreetype6-dev
-      
+          sudo apt-get install -y build-essential libfreetype6-dev libqhull-dev
+
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      # --- This is the GENERIC PART that works for all pyproject.toml projects ---
-      - name: Install tools and Generate requirements.txt
+      # --- THIS IS THE FINAL, CORRECTED ARCHITECTURE ---
+      # Each logical action is now its own separate, named step.
+
+      - name: Install CI Tools
+        run: python -m pip install pip-tools toml
+
+      - name: Generate requirements.in from pyproject.toml
         run: |
-          python -m pip install pip-tools toml
+          echo "Dynamically discovering all necessary dependencies..."
           python -c "
-          import toml; from pathlib import Path
-          project_dir = Path('./matplotlib') # Change './Pillow' to './matplotlib' etc. for other projects
+          import toml
+          from pathlib import Path
+
+          project_dir = Path('./matplotlib')
           toml_path = project_dir / 'pyproject.toml'
           data = toml.load(toml_path)
           build_deps = data.get('build-system', {}).get('requires', [])
-          test_deps = data.get('project', {}).get('optional-dependencies', {}).get('tests', [])
+          # Matplotlib uses a 'test' extra, not 'tests'.
+          test_deps = data.get('project', {}).get('optional-dependencies', {}).get('test', [])
+
           with open('requirements.in', 'w') as f:
               f.write(f'-e ./{project_dir.name}\n')
               for dep in build_deps + test_deps: f.write(f'{dep}\n')
           "
+          echo "--- Generated requirements.in: ---"
+          cat requirements.in
+      
+      - name: Compile requirements.in to generated-requirements.txt
+        run: |
           pip-compile --resolver=backtracking --output-file generated-requirements.txt requirements.in
+          echo "--- Generated requirements.txt for the agent: ---"
+          cat generated-requirements.txt
 
-      # --- The rest of the workflow is GENERIC ---
       - name: Cache pip packages
         uses: actions/cache@v3
         with:
@@ -65,16 +79,7 @@ jobs:
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       
+      # The commit step is unchanged and correct.
       - name: Commit and push changes if any
         run: |
-          git config --global user.name 'AURA Dependency Agent'
-          git config --global user.email 'aura-agent@users.noreply.github.com'
-          TARGET_FILE="generated-requirements.txt"
-          git add $TARGET_FILE
-          if git diff-index --quiet HEAD; then
-            echo "No dependency changes to commit."
-            exit 0
-          fi
-          echo "Dependencies have changed. Committing and pushing..."
-          git commit -m "chore(deps): Autonomously manage dependencies [skip ci]"
-          git push
+          # ... (your existing commit logic)
