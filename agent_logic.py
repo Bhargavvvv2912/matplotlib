@@ -174,11 +174,16 @@ class DependencyAgent:
                     packages_to_update.append((package, current_version, latest_version))
             
             if not packages_to_update:
-                if pass_num == 1 and not self.exclusions_from_this_run: print("\nAll dependencies are up-to-date.")
-                else: print("\nNo further updates possible. System has converged.")
+                if pass_num == 1:
+                    print("\nInitial baseline is already fully up-to-date.")
+                    print("Running a final health check on the baseline for confirmation.")
+                    self._run_final_health_check()
+                # If it's not pass 1 and there's nothing to do, the convergence logic at the end will handle it.
+                else: # This correctly handles the "Convergence" scenario
+                    print("\nNo further updates are available after the previous pass. The system has successfully converged.")
                 end_group()
-                if pass_baseline_reqs_path.exists(): pass_baseline_reqs_path.unlink() # Cleanup
-                break
+                if pass_baseline_reqs_path.exists(): pass_baseline_reqs_path.unlink()
+                break # Exit the `while` loop correctly
             
             packages_to_update.sort(key=lambda p: self._calculate_update_risk(p[0], p[1], p[2]), reverse=True)
             print("\nPrioritized Update Plan for this Pass:")
