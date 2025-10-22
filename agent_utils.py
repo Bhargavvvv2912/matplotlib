@@ -45,20 +45,29 @@ def parse_pytest_summary(full_output):
             
     return summary
 
+
 def _run_smoke_test(python_executable, config):
     print("\n--- Running Smoke Test ---")
-    script_path = config["VALIDATION_CONFIG"]["smoke_test_script"]
-    resolved_path = str(Path(script_path).resolve())
-    command = [python_executable, resolved_path]
     
-    stdout, stderr, returncode = run_command(command)
+    # This logic assumes the smoke test script is in the root of your experiment repo
+    smoke_script_path = str(Path("validation_smoke.py").resolve())
+    smoke_test_command = [python_executable, smoke_script_path]
+    
+    # The command needs to run from the root of the cloned repo (e.g., 'matplotlib')
+    project_dir_name = config["VALIDATION_CONFIG"]["target"]
+    
+    stdout, stderr, returncode = run_command(smoke_test_command, cwd=project_dir_name)
+
     if returncode != 0:
-        print(f"CRITICAL VALIDATION FAILURE: Smoke test '{script_path}' failed.", file=sys.stderr)
+        print(f"CRITICAL VALIDATION FAILURE: Smoke test failed.", file=sys.stderr)
         if stderr: print(f"SMOKE TEST STDERR:\n{stderr}")
-        return False, f"Smoke test failed: {stderr}"
+        
+        # --- THIS IS THE FIX ---
+        # It now correctly returns all three values: (False, reason, output)
+        return False, f"Smoke test failed with exit code {returncode}", stdout + stderr
     
     print("Smoke test PASSED.")
-    return True, "Smoke test passed."
+    return True, "Smoke test passed.", stdout + stderr
 
 def _run_pytest_suite(python_executable, config):
     print("\n--- Running Full Pytest Suite ---")

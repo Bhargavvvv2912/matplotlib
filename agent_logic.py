@@ -85,6 +85,7 @@ class DependencyAgent:
         is_fully_pinned = not any(is_unpinned(line) for line in lines)
 
         return is_fully_pinned, lines
+    
 
     def _bootstrap_unpinned_requirements(self):
         start_group("BOOTSTRAP: Establishing a Stable Baseline")
