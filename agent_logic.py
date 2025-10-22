@@ -86,40 +86,58 @@ class DependencyAgent:
 
         return is_fully_pinned, lines
     
-
-    def _bootstrap_unpinned_requirements(self):
-        start_group("BOOTSTRAP: Establishing a Stable Baseline")
-        print("Unpinned requirements detected. Creating and validating a stable baseline...")
-        venv_dir = Path("./bootstrap_venv")
+    def _install_and_build_environment(self, venv_dir, requirements_path):
+        """
+        Creates a venv and robustly installs a complex project with build dependencies.
+        This is the single source of truth for all environment creation.
+        Returns (success, python_executable, message)
+        """
         if venv_dir.exists(): shutil.rmtree(venv_dir)
         venv.create(venv_dir, with_pip=True)
         python_executable = str((venv_dir / "bin" / "python").resolve())
-        
-        # --- THIS IS THE CORRECT, SINGLE-STEP BOOTSTRAP LOGIC ---
 
-        # 1. Run ONE single, authoritative command that installs both the dependencies
-        #    AND builds the local project (if '-e' is present in the file).
-        print(f"\n--- Step 1: Installing from requirements file: {self.requirements_path} ---")
-        _, stderr, returncode = run_command([python_executable, "-m", "pip", "install", "-r", str(self.requirements_path)])
-        
+        # For compiled projects, some build tools might be needed. This is expert knowledge.
+        # This list can be expanded if other projects need more tools.
+        build_tools = ["setuptools", "wheel", "cython", "meson", "ninja", "meson-python", "pybind11"]
+
+        print(f"\n--- Installing build toolchain in {venv_dir} ---")
+        _, stderr, returncode = run_command([python_executable, "-m", "pip", "install"] + build_tools)
         if returncode != 0:
-            print(f"CRITICAL ERROR: Failed to install initial dependencies. Log follows:")
-            print(f"--- pip stderr ---\n{stderr}\n---")
-            sys.exit("Bootstrap installation failed.")
-        print("Initial installation successful.")
+            return False, python_executable, f"Failed to install build toolchain: {stderr}"
+        
+        print(f"\n--- Installing project requirements from {requirements_path} ---")
+        install_command = [
+            python_executable, "-m", "pip", "install",
+            "--no-build-isolation", 
+            "-r", str(requirements_path)
+        ]
+        _, stderr, returncode = run_command(install_command)
+        if returncode != 0:
+            return False, python_executable, f"Failed to install/build project: {stderr}"
 
-        # 2. If installation succeeds, immediately validate the environment.
-        print("\n--- Step 2: Validating the new baseline environment ---")
+        return True, python_executable, "Environment created successfully."
+    
+    def _bootstrap_unpinned_requirements(self):
+        start_group("BOOTSTRAP: Establishing a Stable Baseline")
+        print("Unpinned requirements detected. Creating and validating a stable baseline...")
+        
+        # Now uses the new "Smart Brain" installer.
+        success, python_executable, message = self._install_and_build_environment(
+            Path("./bootstrap_venv"), self.requirements_path
+        )
+        
+        if not success:
+            sys.exit(f"CRITICAL ERROR: Bootstrap failed during environment creation. Reason: {message}")
+
+        # If the build succeeds, we immediately validate.
         success, metrics, validation_output = validate_changes(python_executable, self.config, group_title="Running Validation on New Baseline")
         if not success:
             print("View Initial Baseline Failure Log", validation_output)
-            sys.exit("CRITICAL ERROR: Initial dependencies passed installation but failed validation.")
-        print("Validation of new baseline PASSED.")
+            sys.exit("CRITICAL ERROR: Initial baseline passed build but failed validation.")
 
-        # 3. If both steps succeed, freeze the final, correct state.
-        print("\n--- Step 3: Freezing the validated environment ---")
+        print("\nInitial baseline is valid and stable!")
         installed_packages, _, _ = run_command([python_executable, "-m", "pip", "freeze"])
-        final_packages = self._prune_pip_freeze(installed_packages) # Your _prune_pip_freeze should keep '-e' lines!
+        final_packages = self._prune_pip_freeze(installed_packages)
         with open(self.requirements_path, "w") as f: f.write(final_packages)
         
         start_group("View new requirements.txt content"); print(final_packages); end_group()
@@ -128,8 +146,6 @@ class DependencyAgent:
             with open(self.config["METRICS_OUTPUT_FILE"], "w") as f: f.write(metrics)
         
         end_group()
-        return
-
 
     def run(self):
         if os.path.exists(self.config["METRICS_OUTPUT_FILE"]): os.remove(self.config["METRICS_OUTPUT_FILE"])
@@ -301,29 +317,26 @@ class DependencyAgent:
 
     def _run_final_health_check(self):
         print("\n" + "#"*70); print("### FINAL SYSTEM HEALTH CHECK ###"); print("#"*70 + "\n")
-        venv_dir = Path("./final_venv")
-        if venv_dir.exists(): shutil.rmtree(venv_dir)
-        venv.create(venv_dir, with_pip=True)
         
-        # *** THE FIX IS HERE: Use .resolve() to get the absolute path. ***
-        python_executable = str((venv_dir / "bin" / "python").resolve())
+        # Now uses the new "Smart Brain" installer.
+        success, python_executable, message = self._install_and_build_environment(
+            Path("./final_venv"), self.requirements_path
+        )
 
-        # First, install the dependencies using the final requirements file.
-        _, stderr, returncode = run_command([python_executable, "-m", "pip", "install", "-r", str(self.requirements_path)])
-        if returncode != 0:
-            print("CRITICAL ERROR: Final installation of combined dependencies failed!", file=sys.stderr); return
+        if not success:
+            print(f"CRITICAL ERROR: Final health check failed during environment creation. Reason: {message}", file=sys.stderr)
+            return
 
-        # Then, run the validation using the newly created environment.
+        # If the build succeeds, we run the final validation.
         success, metrics, _ = validate_changes(python_executable, self.config, group_title="Final System Health Check")
         
         if success and metrics and "not available" not in metrics:
             print("\n" + "="*70); print("=== FINAL METRICS FOR THE FULLY UPDATED ENVIRONMENT ===")
-            indented_metrics = "\n".join([f"  {line}" for line in metrics.split('\n')])
-            print(indented_metrics); print("="*70)
+            print("\n".join([f"  {line}" for line in metrics.split('\n')])); print("="*70)
         elif success:
-            print("\n" + "="*70); print("=== Final validation passed, but metrics were not available in output. ==="); print("="*70)
+            print("\n" + "="*70); print("=== Final validation passed (no metrics). ==="); print("="*70)
         else:
-            print("\n" + "!"*70); print("!!! CRITICAL ERROR: Final validation of combined dependencies failed! !!!"); print("!"*70)
+            print("\n" + "!"*70); print("!!! CRITICAL ERROR: Final validation failed! !!!"); print("!"*70)
 
     def get_latest_version(self, package_name):
         try:
@@ -334,77 +347,46 @@ class DependencyAgent:
         except Exception: return None
 
     def _try_install_and_validate(self, package_to_update, new_version, dynamic_constraints, baseline_reqs_path, is_probe, changed_packages):
-        venv_dir = Path("./temp_venv")
-        if venv_dir.exists(): shutil.rmtree(venv_dir)
-        venv.create(venv_dir, with_pip=True)
-        python_executable = str((venv_dir / "bin" / "python").resolve())
-        
-        temp_reqs_path = venv_dir / "temp_requirements.txt"
+        # First, create the temporary, modified requirements file for this specific test.
+        temp_reqs_path = Path("./temp_venv/temp_requirements.txt")
+        temp_reqs_path.parent.mkdir(exist_ok=True, parents=True)
         
         with open(baseline_reqs_path, "r") as f_read, open(temp_reqs_path, "w") as f_write:
-            lines_for_file = []
-            for line in f_read:
-                line = line.strip()
-                if not line or line.startswith('#'): continue
+            lines = [line.strip() for line in f_read if line.strip() and not line.strip().startswith('#')]
+            for i, line in enumerate(lines):
                 if self._get_package_name_from_spec(line) == package_to_update:
-                    lines_for_file.append(f"{package_to_update}=={new_version}")
-                else:
-                    lines_for_file.append(line)
-            for constraint in dynamic_constraints:
-                 if self._get_package_name_from_spec(constraint) != package_to_update:
-                    lines_for_file.append(constraint)
-            f_write.write("\n".join(lines_for_file))
-
-        pip_command_robust = [python_executable, "-m", "pip", "install", "-r", str(temp_reqs_path)]
-        
-        old_version = "N/A"
-        with open(baseline_reqs_path, "r") as f:
-            for line in f:
-                if self._get_package_name_from_spec(line) == package_to_update:
-                    if '==' in line: old_version = line.strip().split('==')[1]
+                    lines[i] = f"{package_to_update}=={new_version}"
+                    break
+            else: # If the package wasn't found (should not happen), add it.
+                lines.append(f"{package_to_update}=={new_version}")
+            f_write.write("\n".join(lines))
 
         if not is_probe:
-            start_group(f"Attempting to install {package_to_update}=={new_version}")
-            print(f"\nChange analysis: Updating '{package_to_update}' from {old_version} -> {new_version}")
+            start_group(f"Attempting to install and validate {package_to_update}=={new_version}")
 
-        _, stderr_install, returncode = run_command(pip_command_robust)
+        # Now, use the ONE, TRUE installer to build the test environment.
+        success, python_executable, message = self._install_and_build_environment(
+            Path("./temp_venv"), temp_reqs_path
+        )
         
-        if not is_probe: end_group()
-        
-        if returncode != 0:
-            print("INFO: Main installation failed. Retrying with verbose logging to identify conflicting packages...")
+        if not success:
+            if not is_probe: end_group()
+            # The installation itself failed. This is a clear failure signal.
+            return False, f"Installation/Build failed: {message}", message
             
-            with open(temp_reqs_path, 'r') as f:
-                requirements_list_for_log = [line.strip() for line in f if line.strip()]
-
-            pip_command_for_logs = [python_executable, "-m", "pip", "install"] + requirements_list_for_log
-            _, stderr_for_logs, _ = run_command(pip_command_for_logs)
-
-            # *** THE FIX IS HERE: A much more robust regex to capture the conflicting packages. ***
-            conflict_match = re.search(r"Cannot install(?P<packages>[\s\S]+?)because", stderr_for_logs)
-            
-            reason = ""
-            if conflict_match:
-                # Clean up the captured package list for a clean log
-                conflicting_packages = ' '.join(conflict_match.group('packages').split())
-                conflicting_packages = conflicting_packages.replace(' and ', ', ').replace(',', ', ')
-                reason = f"Conflict between packages: {conflicting_packages}"
-                print(f"DIAGNOSIS: {reason}")
-            else:
-                # This is the fallback if the regex still fails for some reason
-                llm_summary = self._ask_llm_to_summarize_error(stderr_install)
-                reason = f"Installation conflict. Summary: {llm_summary}"
-            
-            return False, reason, stderr_install
-
-        if new_version == old_version and not changed_packages:
-             # This message will now be correctly logged by the binary search function
+        # If the build succeeds, THEN we run validation.
+        # This also correctly handles the "Validation skipped (no change)" logic inside it.
+        if new_version == baseline_reqs_path.read_text().split(f"{package_to_update}==")[-1].split('\n')[0] and not changed_packages:
+             if not is_probe: end_group()
              return True, "Validation skipped (no change)", ""
 
         group_title = f"Validation for {package_to_update}=={new_version}"
-        success, metrics, validation_output = validate_changes(python_executable, self.config, group_title=group_title)
-        if not success:
-            return False, "Validation script failed", validation_output
+        val_success, metrics, val_output = validate_changes(python_executable, self.config, group_title=group_title)
+
+        if not is_probe: end_group()
+
+        if not val_success:
+            return False, "Validation script failed", val_output
         return True, metrics, ""
 
     def attempt_update_with_healing(self, package, current_version, target_version, is_primary, dynamic_constraints, baseline_reqs_path, changed_packages_this_pass):
